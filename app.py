@@ -1,137 +1,159 @@
 import streamlit as st
 import pandas as pd
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode, JsCode
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from io import BytesIO
 from fpdf import FPDF
-import base64
 
 st.set_page_config(page_title="💼 Pricing & Services", layout="wide")
 
-# --------------------------
 # Constants
-# --------------------------
 SHEET_ID = "1WeDpcSNnfCrtx4F3bBC9osigPkzy3LXybRO6jpN7BXE"
 VISIBLE_COLUMNS = ["Service Category", "Item", "Price (USD)", "Turnaround Time", "Notes"]
 
-# --------------------------
-# Sidebar Auth
-# --------------------------
-st.sidebar.header("🔐 Upload Google JSON Auth")
-json_file = st.sidebar.file_uploader("Upload your Google Service Account .json", type="json")
+st.sidebar.header("🔐 Google Auth")
+json_file = st.sidebar.file_uploader(
+    "Upload your Google Service Account .json", type="json", key="json_upload"
+)
 
-def get_sheet_data(sheet_id, worksheet_index=0):
+def get_gsheet_data(sheet_id, worksheet_index=0):
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(eval(json_file.read()), scope)
     client = gspread.authorize(creds)
     sheet = client.open_by_key(sheet_id)
     worksheet = sheet.get_worksheet(worksheet_index)
-    return worksheet, pd.DataFrame(worksheet.get_all_records())
+    df = pd.DataFrame(worksheet.get_all_records())
+    return worksheet, df
 
-# --------------------------
-# PDF Export Utility
-# --------------------------
 def export_pdf(df):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=10)
     pdf.cell(200, 10, txt="Pricing & Services", ln=True, align='C')
     for idx, row in df.iterrows():
-        text = f"{row['Service Category']} | {row['Item']} | ${row['Price (USD)']} | {row['Turnaround Time']} | {row['Notes']}"
+        text = " | ".join([f"{v}" for v in row.values])
         pdf.cell(200, 8, txt=text, ln=True)
     pdf_buffer = BytesIO()
     pdf.output(pdf_buffer)
     return pdf_buffer.getvalue()
 
-# --------------------------
+def aggrid_table(df, selection_mode="multiple"):
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_pagination()
+    gb.configure_side_bar()
+    gb.configure_columns(["Price (USD)"], type=["numericColumn", "customNumericFormat"], precision=2)
+    gb.configure_default_column(editable=True, groupable=True, filter=True, sortable=True, resizable=True)
+    gb.configure_selection(selection_mode=selection_mode, use_checkbox=True)
+    gb.configure_grid_options(domLayout='autoHeight')
+    grid = AgGrid(
+        df,
+        gridOptions=gb.build(),
+        allow_unsafe_jscode=True,
+        update_mode=GridUpdateMode.MODEL_CHANGED,
+        fit_columns_on_grid_load=True,
+        height=500,
+        theme="streamlit"
+    )
+    return grid
+
 # App Logic
-# --------------------------
 if json_file:
     try:
-        ws, df = get_sheet_data(SHEET_ID)
+        ws, df = get_gsheet_data(SHEET_ID)
         df.columns = df.columns.str.strip()
         df = df[VISIBLE_COLUMNS]
 
-        # --------------------------
-        # Header and KPIs
-        # --------------------------
         st.title("💼 Pricing & Services Dashboard")
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("🧾 Total Services", len(df))
-        col2.metric("💲 Avg. Price (USD)", f"${df['Price (USD)'].mean():.2f}")
-        col3.metric("🗂️ Categories", df['Service Category'].nunique())
+        # KPIs
+        metric1, metric2, metric3 = st.columns(3)
+        metric1.metric("🧾 Total Services", len(df))
+        metric2.metric("💲 Avg. Price (USD)", f"${df['Price (USD)'].mean():.2f}")
+        metric3.metric("🗂️ Categories", df["Service Category"].nunique())
+        st.markdown("---")
+
+        # Filter Panel
+        with st.expander("🔍 Advanced Filtering & Search", expanded=True):
+            category_options = ["All"] + sorted(df["Service Category"].unique())
+            col_f1, col_f2 = st.columns([2,2])
+            category_f = col_f1.selectbox("Service Category", category_options, index=0)
+            search_str = col_f2.text_input("Search (across all columns)")
+            # Filter logic
+            filter_df = df.copy()
+            if category_f != "All":
+                filter_df = filter_df[filter_df["Service Category"] == category_f]
+            if search_str:
+                filter_df = filter_df[filter_df.apply(lambda row: search_str.lower() in str(row).lower(), axis=1)]
+
+        # AgGrid Table + Actions
+        st.markdown("#### 📋 Service List (editable table, click cells to edit)")
+        grid_response = aggrid_table(filter_df, selection_mode="multiple")
 
         st.markdown("---")
 
-        # --------------------------
-        # Search & Filter
-        # --------------------------
-        st.subheader("🔍 Filter Services")
-        category_filter = st.selectbox("Filter by Category", ["All"] + sorted(df["Service Category"].unique()))
-        if category_filter != "All":
-            df = df[df["Service Category"] == category_filter]
+        # Download/Export options
+        exp_col1, exp_col2, exp_col3 = st.columns([1,1,1])
+        exp_col1.download_button("⬇️ CSV", filter_df.to_csv(index=False), "services.csv", "text/csv")
+        excel_bytes = BytesIO()
+        filter_df.to_excel(excel_bytes, index=False)
+        exp_col2.download_button("⬇️ XLSX", excel_bytes.getvalue(), "services.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        pdf_bytes = export_pdf(filter_df)
+        exp_col3.download_button("🖨️ PDF", pdf_bytes, "services.pdf", "application/pdf")
 
-        search_term = st.text_input("Search Item or Notes")
-        if search_term:
-            df = df[df.apply(lambda row: search_term.lower() in str(row).lower(), axis=1)]
+        st.info("Tip: Use the checkboxes to select rows for editing or deletion below.")
 
-        st.dataframe(df, use_container_width=True)
-
-        # --------------------------
-        # Download Options
-        # --------------------------
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button("⬇️ Download CSV", df.to_csv(index=False), "services.csv", "text/csv")
-        with col2:
-            pdf_data = export_pdf(df)
-            st.download_button("🖨️ Export PDF", pdf_data, "services.pdf", "application/pdf")
-
-        st.markdown("---")
-
-        # --------------------------
         # Add New Service
-        # --------------------------
-        with st.expander("➕ Add New Service", expanded=False):
+        with st.expander("➕ Add New Service"):
             with st.form("add_service_form"):
-                new_cat = st.text_input("Service Category")
-                new_item = st.text_input("Item")
-                new_price = st.number_input("Price (USD)", min_value=0.0)
-                new_turn = st.text_input("Turnaround Time")
-                new_notes = st.text_area("Notes")
-                add_submit = st.form_submit_button("✅ Add Service")
-                if add_submit:
+                ac1, ac2, ac3 = st.columns([2,3,2])
+                new_cat = ac1.text_input("Service Category")
+                new_item = ac2.text_input("Item/Description")
+                new_price = ac3.number_input("Price (USD)", min_value=0.0, step=1.0)
+                new_turn = ac1.text_input("Turnaround Time")
+                new_notes = ac2.text_input("Notes")
+                submit_add = st.form_submit_button("✅ Add Service")
+                if submit_add:
                     ws.append_row([new_cat, new_item, new_price, new_turn, new_notes])
-                    st.success("Service added. Refresh the app.")
+                    st.success("Service added. Refresh to see it in the table.")
 
-        # --------------------------
-        # Edit Service
-        # --------------------------
-        with st.expander("✏️ Edit Existing Service"):
-            row_num = st.number_input("Enter Row # to Edit (Starts from 2)", min_value=2, max_value=len(df)+1)
-            selected_row = df.iloc[row_num - 2]
-            with st.form("edit_form"):
-                category = st.text_input("Service Category", selected_row["Service Category"])
-                item = st.text_input("Item", selected_row["Item"])
-                price = st.number_input("Price (USD)", value=float(selected_row["Price (USD)"]))
-                turn = st.text_input("Turnaround Time", selected_row["Turnaround Time"])
-                notes = st.text_area("Notes", selected_row["Notes"])
-                update_btn = st.form_submit_button("🔄 Update Row")
-                if update_btn:
-                    ws.update(f"A{row_num}:E{row_num}", [[category, item, price, turn, notes]])
-                    st.success("Row updated. Refresh the app.")
+        # Inline/Batch Update
+        with st.expander("✏️ Batch Edit Services (Selected Rows)", expanded=False):
+            if grid_response['selected_rows']:
+                selected = pd.DataFrame(grid_response['selected_rows'])
+                st.dataframe(selected)
+                st.info("After making edits in the table above, click the 'Update Rows' button below.")
+                if st.button("🔄 Update Selected Rows in Google Sheet"):
+                    for _, row in selected.iterrows():
+                        # Find row index in main DataFrame (minus header offset, index starts at 2)
+                        main_idx = df[(df["Service Category"] == row["Service Category"]) & 
+                                      (df["Item"] == row["Item"])].index
+                        if not main_idx.empty:
+                            ws.update(f"A{main_idx[0]+2}:E{main_idx[0]+2}", [row.values[:5]])
+                    st.success("Rows updated! Refresh to view changes.")
+            else:
+                st.info("Select one or more rows via the left checkboxes in the table above.")
 
-        # --------------------------
-        # Delete Row
-        # --------------------------
-        with st.expander("❌ Delete Service Row"):
-            delete_row = st.number_input("Enter Row # to Delete (Starts from 2)", min_value=2, max_value=len(df)+1)
-            if st.button("🗑️ Delete"):
-                ws.delete_rows(delete_row)
-                st.warning(f"Row {delete_row} deleted.")
+        # Delete Service
+        with st.expander("❌ Batch Delete Selected Services"):
+            if grid_response["selected_rows"]:
+                del_rows = pd.DataFrame(grid_response["selected_rows"])
+                if st.button(f"🗑️ DELETE {len(del_rows)} Selected Row(s) !!"):
+                    # Remember, Google Sheet row numbers start from 2 (header is row 1)
+                    for _, sel in del_rows.iterrows():
+                        idx = df[(df["Service Category"] == sel["Service Category"]) & (df["Item"] == sel["Item"])].index
+                        if not idx.empty:
+                            ws.delete_rows(idx[0]+2)
+                    st.warning("Selected rows/records deleted! Refresh to update the view.")
+            else:
+                st.info("Select one or more rows using checkboxes before deleting.")
+
+        st.caption("Powered by Streamlit, Google Sheets & st-aggrid. Refresh (F5) after edit/add/remove to reload data.")
 
     except Exception as e:
-        st.error(f"❌ Error loading sheet: {e}")
+        st.error(f"❌ Error: {e}")
 else:
-    st.warning("⬅️ Upload your Google Service JSON file to continue.")
+    st.warning("⬅️ Upload your Google Service JSON file in the sidebar to continue.")
+
+
+
