@@ -9,36 +9,33 @@ from fpdf import FPDF
 SHEET_ID = "1WeDpcSNnfCrtx4F3bBC9osigPkzy3LXybRO6jpN7BXE"
 VISIBLE_COLUMNS = ["Service Category", "Item", "Price (USD)", "Turnaround Time", "Notes"]
 
-st.set_page_config(page_title="💼 Pricing & Services", layout="wide")
+st.set_page_config(page_title="💼 Pricing & Services - Cards View", layout="wide")
 
-# ----- Auth & Google Sheet Connection -----
+# --- Utilities ---
+
 def load_gsheet_data(json_data, sheet_id):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    scope = ["https://spreadsheets.google.com/feeds",
+             "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_data, scope)
     client = gspread.authorize(creds)
     sheet = client.open_by_key(sheet_id)
     worksheet = sheet.get_worksheet(0)
-    data = worksheet.get_all_records()
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(worksheet.get_all_records())
     return worksheet, df
 
-# ----- PDF Export Utility -----
+
 def export_pdf(df: pd.DataFrame) -> bytes:
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=10)
     pdf.cell(0, 10, "Pricing & Services", ln=True, align="C")
     pdf.ln(5)
-    
     col_widths = [40, 50, 25, 40, 35]
     headers = VISIBLE_COLUMNS
-    
-    # Header row
-    for i, header in enumerate(headers):
-        pdf.cell(col_widths[i], 8, header, border=1)
+
+    for i, h in enumerate(headers):
+        pdf.cell(col_widths[i], 8, h, border=1)
     pdf.ln()
-    
-    # Data rows
     for _, row in df.iterrows():
         pdf.cell(col_widths[0], 7, str(row["Service Category"]), border=1)
         pdf.cell(col_widths[1], 7, str(row["Item"]), border=1)
@@ -46,47 +43,56 @@ def export_pdf(df: pd.DataFrame) -> bytes:
         pdf.cell(col_widths[3], 7, str(row["Turnaround Time"]), border=1)
         pdf.cell(col_widths[4], 7, str(row["Notes"]), border=1)
         pdf.ln()
-    
-    # Instead of passing BytesIO to output(), write to BytesIO manually
-    pdf_bytes = pdf.output(dest='S').encode('latin1')
-    return pdf_bytes
+    return pdf.output(dest='S').encode('latin1')
 
-# ----- Main App -----
+
+def update_row(worksheet, row_number, values):
+    worksheet.update(f"A{row_number}:E{row_number}", [values])
+
+
+def add_service(worksheet, values):
+    worksheet.append_row(values)
+
+
+def delete_row(worksheet, row_number):
+    worksheet.delete_rows(row_number)
+
+
+# --- Main App ---
+
 def main():
-    st.title("💼 Pricing & Services Dashboard")
+    st.title("💼 Pricing & Services - Card View")
+
     st.sidebar.header("🔐 Upload Google Service Account JSON")
-    
     json_file = st.sidebar.file_uploader("Upload your Google Service Account JSON", type=["json"])
-    
+
     if not json_file:
         st.warning("⬅️ Upload your Google Service JSON file in the sidebar to continue.")
         return
-    
-    # Load and parse JSON securely
+
+    # Load JSON
     try:
-        json_data = json_file.getvalue().decode("utf-8")  # bytes to string
-        json_dict = eval(json_data)  # careful, eval requires strict JSON but if yours is valid, can use json.loads(json_data)
+        json_data = json_file.getvalue().decode("utf-8")
+        json_dict = eval(json_data)
     except Exception as e:
-        st.error(f"Invalid JSON file or parsing error: {e}")
+        st.error(f"Invalid JSON: {e}")
         return
-    
+
     try:
         worksheet, df = load_gsheet_data(json_dict, SHEET_ID)
     except Exception as e:
         st.error(f"❌ Error loading Google Sheet: {e}")
         return
-    
-    # Clean dataframe columns & filter visible ones
+
     df.columns = df.columns.str.strip()
     df = df[VISIBLE_COLUMNS]
-    
-    # Show KPIs
+
+    # KPIs
     k1, k2, k3 = st.columns(3)
     k1.metric("🧾 Total Services", len(df))
     avg_price = df["Price (USD)"].mean()
     k2.metric("💲 Avg. Price (USD)", f"${avg_price:.2f}" if not pd.isna(avg_price) else "$0.00")
     k3.metric("🗂️ Categories", df["Service Category"].nunique())
-    
     st.markdown("---")
 
     # Filters
@@ -96,73 +102,82 @@ def main():
     filtered_df = df.copy()
     if selected_cat != "All":
         filtered_df = filtered_df[filtered_df["Service Category"] == selected_cat]
-    
+
     search_term = st.text_input("Search Item or Notes")
     if search_term:
-        mask = filtered_df.apply(lambda r: search_term.lower() in str(r["Item"]).lower() or search_term.lower() in str(r["Notes"]).lower(), axis=1)
+        mask = filtered_df.apply(lambda r: search_term.lower() in str(r["Item"]).lower()
+                                            or search_term.lower() in str(r["Notes"]).lower(), axis=1)
         filtered_df = filtered_df[mask]
-    
-    st.dataframe(filtered_df, use_container_width=True)
 
-    # ----- Download buttons -----
+    st.markdown("### 📌 Service Items")
+
+    # Show each item in an expander card for details + inline editing
+    for idx, row in filtered_df.iterrows():
+        # Calculate row number in sheet (header is row 1, data start at 2)
+        sheet_row_num = idx + 2
+        with st.expander(f"🔹 {row['Service Category']} - {row['Item']} (Row #{sheet_row_num})", expanded=False):
+
+            # Display fields for edit inside a form
+            with st.form(f"edit_form_{sheet_row_num}"):
+                col1, col2 = st.columns(2)
+                category = col1.text_input("Service Category", value=row["Service Category"], key=f"cat_{sheet_row_num}")
+                item = col2.text_input("Item", value=row["Item"], key=f"item_{sheet_row_num}")
+                price = st.number_input("Price (USD)", min_value=0.0, value=float(row["Price (USD)"]), format="%.2f", key=f"price_{sheet_row_num}")
+                turnaround = st.text_input("Turnaround Time", value=row["Turnaround Time"], key=f"turn_{sheet_row_num}")
+                notes = st.text_area("Notes", value=row["Notes"], key=f"notes_{sheet_row_num}")
+
+                update_btn = st.form_submit_button("🔄 Update this Service")
+                delete_btn = st.form_submit_button("❌ Delete this Service")
+
+                if update_btn:
+                    try:
+                        values = [category, item, price, turnaround, notes]
+                        update_row(worksheet, sheet_row_num, values)
+                        st.success(f"Row #{sheet_row_num} updated successfully. Please refresh to see changes.")
+                    except Exception as e:
+                        st.error(f"Failed to update row {sheet_row_num}: {e}")
+
+                if delete_btn:
+                    try:
+                        delete_row(worksheet, sheet_row_num)
+                        st.warning(f"Row #{sheet_row_num} deleted. Please refresh to update the view.")
+                    except Exception as e:
+                        st.error(f"Failed to delete row {sheet_row_num}: {e}")
+
+    st.markdown("---")
+    st.subheader("➕ Add New Service")
+    with st.form("add_service_form"):
+        col1, col2 = st.columns(2)
+        new_category = col1.text_input("Service Category")
+        new_item = col2.text_input("Item")
+        new_price = st.number_input("Price (USD)", min_value=0.0, format="%.2f")
+        new_turnaround = st.text_input("Turnaround Time")
+        new_notes = st.text_area("Notes")
+        submit_add = st.form_submit_button("✅ Add Service")
+
+        if submit_add:
+            if not new_category or not new_item:
+                st.error("Service Category and Item are required.")
+            else:
+                try:
+                    add_service(worksheet, [new_category, new_item, new_price, new_turnaround, new_notes])
+                    st.success("Service added successfully! Please refresh the app to see the latest data.")
+                except Exception as e:
+                    st.error(f"Failed to add service: {e}")
+
+    # Export buttons
+    st.markdown("---")
+    st.subheader("📤 Export Filtered Data")
     col_csv, col_pdf = st.columns(2)
     with col_csv:
-        csv_data = filtered_df.to_csv(index=False).encode('utf-8')
-        st.download_button("⬇️ Download CSV", csv_data, "services.csv", "text/csv")
+        csv_bytes = filtered_df.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Download CSV", csv_bytes, "services.csv", "text/csv")
+
     with col_pdf:
-        pdf_data = export_pdf(filtered_df)
-        st.download_button("🖨️ Export PDF", pdf_data, "services.pdf", "application/pdf")
-    
-    st.markdown("---")
-    
-    # ----- Add Service -----
-    with st.expander("➕ Add New Service", expanded=False):
-        with st.form("add_service_form"):
-            col1, col2 = st.columns(2)
-            new_category = col1.text_input("Service Category")
-            new_item = col2.text_input("Item")
-            new_price = st.number_input("Price (USD)", min_value=0.0, format="%.2f")
-            new_turnaround = st.text_input("Turnaround Time")
-            new_notes = st.text_area("Notes")
-            submit_add = st.form_submit_button("✅ Add Service")
-            if submit_add:
-                if not new_category or not new_item:
-                    st.error("Service Category and Item are required.")
-                else:
-                    # Append row
-                    try:
-                        worksheet.append_row([new_category, new_item, new_price, new_turnaround, new_notes])
-                        st.success("Service added successfully! Please refresh the app to see updates.")
-                    except Exception as e:
-                        st.error(f"Failed to add new service: {e}")
-    
-    # ----- Edit Service -----
-    with st.expander("✏️ Edit Service Row", expanded=False):
-        row_num = st.number_input("Row number to edit (starting at 2)", min_value=2, max_value=len(filtered_df)+1, step=1)
-        if st.button("Load row data"):
-            try:
-                row_data = filtered_df.iloc[row_num - 2]
-                # Display fields for editing
-                edit_cat = st.text_input("Service Category", row_data["Service Category"])
-                edit_item = st.text_input("Item", row_data["Item"])
-                edit_price = st.number_input("Price (USD)", min_value=0.0, value=float(row_data["Price (USD)"]))
-                edit_turn = st.text_input("Turnaround Time", row_data["Turnaround Time"])
-                edit_notes = st.text_area("Notes", row_data["Notes"])
-                if st.button("🔄 Update Service"):
-                    worksheet.update(f"A{row_num}:E{row_num}", [[edit_cat, edit_item, edit_price, edit_turn, edit_notes]])
-                    st.success(f"Row {row_num} updated. Please refresh the app to see changes.")
-            except Exception as e:
-                st.error(f"Failed to load or update row: {e}")
-    
-    # ----- Delete Service -----
-    with st.expander("❌ Delete Service Row", expanded=False):
-        del_row = st.number_input("Row number to delete (starting at 2)", min_value=2, max_value=len(filtered_df)+1, step=1)
-        if st.button("🗑️ Delete Row"):
-            try:
-                worksheet.delete_rows(del_row)
-                st.warning(f"Row {del_row} deleted. Please refresh the app to see updates.")
-            except Exception as e:
-                st.error(f"Failed to delete row: {e}")
+        pdf_bytes = export_pdf(filtered_df)
+        st.download_button("🖨️ Download PDF", pdf_bytes, "services.pdf", "application/pdf")
+
+    st.caption("💡 Please refresh the app (F5) after adding, updating, or deleting services to reload.")
 
 if __name__ == "__main__":
     main()
